@@ -150,25 +150,25 @@ class TextProcessor:
     
     @staticmethod
     def advanced_normalize_for_deduplication(text: str) -> str:
-        """Advanced normalization for superior deduplication"""
+        """Less aggressive normalization that preserves unique questions"""
         if not isinstance(text, str):
             return ""
             
-        # Step 1: Clean and standardize
+        # Step 1: Basic cleanup only
         text = re.sub(r'[^\w\s]', ' ', text.strip())
         text = re.sub(r'\s+', ' ', text)
-        
-        # Step 2: Business terminology normalization
-        business_terms = {
-            r'\b(BUSINESS|COMPANY|ORGANIZATION|ORGANISATION|FIRM|ENTERPRISE|STARTUP)\b': 'ENTITY',
-            r'\b(20\d{2}|LAST\s+YEAR|THIS\s+YEAR|CURRENT\s+YEAR|PREVIOUS\s+YEAR)\b': 'TIMEPOINT',
-            r'\b(YOU|YOUR|YOURSELF)\b': 'PERSON',
-            r'\b(MONEY|CASH|INCOME|REVENUE|PROFIT|FINANCIAL)\b': 'FINANCIAL'
-        }
-        
         text_upper = text.upper()
-        for pattern, replacement in business_terms.items():
-            text_upper = re.sub(pattern, replacement, text_upper)
+        
+        # Step 2: Only normalize obvious duplicates - be much more conservative
+        # Only replace specific years with generic placeholder
+        text_upper = re.sub(r'\b20[0-9]{2}\b', 'YEAR', text_upper)
+        
+        # Only replace exact matches for temporal terms
+        text_upper = re.sub(r'\bLAST YEAR\b', 'PREVIOUS_YEAR', text_upper)
+        text_upper = re.sub(r'\bTHIS YEAR\b', 'CURRENT_YEAR', text_upper)
+        
+        # Remove the aggressive business term normalization that was causing over-consolidation
+        # This was making different business questions look identical
         
         return text_upper.strip()
     
@@ -185,11 +185,11 @@ class TextProcessor:
         return text.strip()
 
 class SurveyDeduplicator:
-    """Enhanced deduplication with proven 99.88% and 99.66% efficiency"""
+    """Enhanced deduplication that preserves unique questions while consolidating true duplicates"""
     
     def __init__(self):
         self.processor = TextProcessor()
-        logger.info("🚀 Enhanced Question+Choice Deduplicator initialized with superior logic")
+        logger.info("🚀 Enhanced Question+Choice Deduplicator initialized with improved logic that preserves unique questions")
     
     def create_question_mappings(self) -> Dict[str, str]:
         """Create business terminology mappings for questions"""
@@ -227,101 +227,411 @@ class SurveyDeduplicator:
         }
     
     def apply_enhanced_deduplication_solutions(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict]:
-        """Apply the proven enhanced deduplication solutions"""
-        logger.info("🚀 Applying enhanced deduplication solutions...")
+        """Apply correct deduplication that preserves unique questions and only removes actual duplicates"""
+        logger.info("🚀 Applying correct question-level deduplication...")
         original_count = len(df)
         logger.info(f"📊 Original records: {original_count}")
         
-        # Make a copy to work with
-        df_work = df.copy()
+        # STEP 1: Create question objects (group by question text)
+        logger.info("🔧 STEP 1: Creating question objects...")
+        question_objects = []
         
-        # SOLUTION 1: Trim whitespace
-        logger.info("🧹 SOLUTION 1: Trimming whitespace...")
-        df_work['question_text'] = df_work['question_text'].str.strip()
-        df_work['choice_text'] = df_work['choice_text'].str.strip()
+        for question_text, group in df.groupby('question_text'):
+            # Get all choices for this question
+            choices = [choice for choice in group['choice_text'].dropna().unique() if str(choice).strip()]
+            choices.sort()  # Sort for consistent comparison
+            
+            # Get additional metadata
+            uids = group['uid'].dropna().unique().tolist() if 'uid' in group.columns else []
+            survey_stages = group['survey_stage'].dropna().unique().tolist() if 'survey_stage' in group.columns else []
+            
+            # Pick best representative record (most recent, longest choice)
+            group_sorted = group.sort_values([
+                'date_modified' if 'date_modified' in group.columns else 'choice_text',
+                'choice_text'
+            ], ascending=[False, True])
+            
+            best_record = group_sorted.iloc[0]
+            
+            question_obj = {
+                'question_text': question_text,
+                'normalized_question': self.normalize_text_for_comparison(question_text),
+                'core_question': self.extract_core_question(question_text),
+                'choices': choices,
+                'choice_count': len(choices),
+                'uids': uids,
+                'survey_stages': survey_stages,
+                'total_occurrences': len(group),
+                'best_record': best_record,
+                'original_index': best_record.name
+            }
+            
+            question_objects.append(question_obj)
         
-        # SOLUTION 2: Normalize questions
-        logger.info("🔧 SOLUTION 2: Normalizing questions...")
-        df_work['normalized_question'] = df_work['question_text'].apply(
-            self.processor.advanced_normalize_for_deduplication
-        )
+        logger.info(f"📋 Created {len(question_objects)} unique questions")
         
-        # SOLUTION 3: Group by UID + normalized question, keep best choice per group
-        logger.info("🔄 SOLUTION 3: Grouping by UID + normalized question...")
+        # STEP 2: Detect duplicate questions using enhanced criteria
+        logger.info("🔍 STEP 2: Detecting duplicate questions...")
+        duplicate_groups = self.detect_question_duplicates(question_objects)
         
-        # Add temporary column for choice length to avoid replacing choice_text
-        df_work['choice_length'] = df_work['choice_text'].str.len()
+        # STEP 3: Select best representative from each duplicate group
+        logger.info("🎯 STEP 3: Selecting best representatives...")
+        final_questions = []
         
-        # Sort by choice length (longer choices preferred) and date
-        df_work = df_work.sort_values([
-            'normalized_question', 
-            'uid',
-            'choice_length', 
-            'date_modified'
-        ], ascending=[True, True, False, False])
+        # Add all unique questions (no duplicates)
+        processed_indices = set()
+        for group in duplicate_groups:
+            for q_obj in group:
+                processed_indices.add(id(q_obj))
         
-        # Remove the temporary column
-        df_work = df_work.drop('choice_length', axis=1)
+        # First, add all questions that have no duplicates
+        for q_obj in question_objects:
+            if id(q_obj) not in processed_indices:
+                final_questions.append(q_obj)
         
-        # Remove duplicates keeping first (best) occurrence
-        df_dedup = df_work.drop_duplicates(
-            subset=['normalized_question', 'uid', 'choice_text'],
-            keep='first'
-        )
+        # Then, add best representative from each duplicate group
+        for group in duplicate_groups:
+            # Select best question from duplicate group based on quality
+            best_question = self.select_best_from_group(group)
+            final_questions.append(best_question)
         
-        # Further consolidation: one choice per normalized question-uid pair
-        df_final = df_dedup.drop_duplicates(
-            subset=['normalized_question', 'choice_text'],
-            keep='first'
-        )
+        # STEP 4: Create final DataFrame
+        logger.info("📊 STEP 4: Creating final results...")
+        final_records = []
+        for q_obj in final_questions:
+            # Use the best record for this question
+            record = q_obj['best_record'].to_dict()
+            final_records.append(record)
+        
+        df_final = pd.DataFrame(final_records)
         
         final_count = len(df_final)
-        reduction_pct = ((original_count - final_count) / original_count * 100)
+        reduction_pct = ((original_count - final_count) / original_count * 100) if original_count > 0 else 0
         choices_eliminated = original_count - final_count
         
-        logger.info(f"✅ ENHANCED DEDUPLICATION COMPLETE: {original_count} → {final_count} records ({reduction_pct:.2f}% reduction)")
-        logger.info(f"🎯 Eliminated {choices_eliminated} duplicate choices")
+        # Enhanced reporting
+        unique_questions_before = len(question_objects)
+        unique_questions_after = len(final_questions)
+        questions_with_duplicates = len(duplicate_groups)
+        total_duplicate_relationships = sum(len(group) - 1 for group in duplicate_groups)
         
-        # Clean up working columns
-        result_df = df_final.drop(['normalized_question'], axis=1, errors='ignore')
+        logger.info(f"✅ CORRECT DEDUPLICATION COMPLETE:")
+        logger.info(f"   Records: {original_count:,} → {final_count:,} ({reduction_pct:.1f}% reduction)")
+        logger.info(f"   Unique questions: {unique_questions_before:,} → {unique_questions_after:,}")
+        logger.info(f"   Questions with duplicates: {questions_with_duplicates}")
+        logger.info(f"   Duplicate relationships removed: {total_duplicate_relationships}")
+        logger.info(f"   Unique questions preserved: {unique_questions_after - questions_with_duplicates}")
         
         report = {
             'original_count': original_count,
             'final_count': final_count,
             'reduction_percentage': reduction_pct,
-            'choices_eliminated': choices_eliminated
+            'choices_eliminated': choices_eliminated,
+            'original_unique_questions': unique_questions_before,
+            'final_unique_questions': unique_questions_after,
+            'questions_with_duplicates': questions_with_duplicates,
+            'total_duplicate_relationships': total_duplicate_relationships,
+            'unique_questions_preserved': unique_questions_after - questions_with_duplicates
         }
         
-        return result_df, report
+        return df_final, report
     
+    def normalize_text_for_comparison(self, text: str) -> str:
+        """Normalize text for duplicate detection"""
+        if not text or pd.isna(text):
+            return ''
+        
+        # Convert to lowercase and replace punctuation with spaces
+        normalized = re.sub(r'[^\w\s]', ' ', str(text).lower())
+        # Normalize whitespace
+        normalized = re.sub(r'\s+', ' ', normalized).strip()
+        
+        return normalized
+    
+    def extract_core_question(self, text: str) -> str:
+        """Extract core question by removing common prefixes and markers"""
+        if not text or pd.isna(text):
+            return ''
+        
+        core = self.normalize_text_for_comparison(text)
+        
+        # Remove common prefixes
+        core = re.sub(r'^\*\s*', '', core)  # Remove asterisks
+        core = re.sub(r'^question\s*\d*\s*:?\s*', '', core, flags=re.IGNORECASE)  # Remove "Question X:"
+        core = re.sub(r'^q\s*\d*\s*:?\s*', '', core, flags=re.IGNORECASE)  # Remove "Q X:"
+        
+        return core.strip()
+    
+    def calculate_jaccard_similarity(self, text1: str, text2: str) -> float:
+        """Calculate Jaccard similarity coefficient between two texts"""
+        words1 = set(word for word in self.normalize_text_for_comparison(text1).split() if len(word) > 2)
+        words2 = set(word for word in self.normalize_text_for_comparison(text2).split() if len(word) > 2)
+        
+        if len(words1) == 0 and len(words2) == 0:
+            return 1.0
+        if len(words1) == 0 or len(words2) == 0:
+            return 0.0
+        
+        intersection = words1.intersection(words2)
+        union = words1.union(words2)
+        
+        return len(intersection) / len(union) if len(union) > 0 else 0.0
+    
+    def calculate_choice_similarity(self, choices1: List[str], choices2: List[str]) -> float:
+        """Calculate similarity between two choice sets"""
+        if not choices1 and not choices2:
+            return 1.0
+        if not choices1 or not choices2:
+            return 0.0
+        
+        # Normalize choices for comparison
+        norm_choices1 = set(self.normalize_text_for_comparison(choice) for choice in choices1 if choice)
+        norm_choices2 = set(self.normalize_text_for_comparison(choice) for choice in choices2 if choice)
+        
+        intersection = norm_choices1.intersection(norm_choices2)
+        union = norm_choices1.union(norm_choices2)
+        
+        return len(intersection) / len(union) if len(union) > 0 else 0.0
+    
+    def detect_question_duplicates(self, question_objects: List[Dict]) -> List[List[Dict]]:
+        """Detect duplicate questions using enhanced criteria from user's analysis"""
+        duplicate_groups = []
+        processed = set()
+        
+        for i, primary_question in enumerate(question_objects):
+            if i in processed:
+                continue
+            
+            current_group = [primary_question]
+            
+            for j, other_question in enumerate(question_objects[i + 1:], start=i + 1):
+                if j in processed:
+                    continue
+                
+                is_duplicate = False
+                
+                # Calculate similarities
+                question_similarity = self.calculate_jaccard_similarity(
+                    primary_question['question_text'], 
+                    other_question['question_text']
+                )
+                
+                choice_similarity = self.calculate_choice_similarity(
+                    primary_question['choices'], 
+                    other_question['choices']
+                )
+                
+                # DETECTION CRITERIA (based on user's enhanced analysis)
+                
+                # 1. Exact normalized question match
+                if (primary_question['normalized_question'] == other_question['normalized_question'] and 
+                    len(primary_question['normalized_question']) > 5):
+                    is_duplicate = True
+                
+                # 2. Core question match
+                if (primary_question['core_question'] == other_question['core_question'] and 
+                    len(primary_question['core_question']) > 10):
+                    is_duplicate = True
+                
+                # 3. High question similarity (85% threshold from user's analysis)
+                if (question_similarity >= 0.85 and 
+                    len(primary_question['normalized_question']) > 15):
+                    is_duplicate = True
+                
+                # 4. Identical choices (indicates same question)
+                if (set(primary_question['choices']) == set(other_question['choices']) and 
+                    len(primary_question['choices']) > 2):
+                    is_duplicate = True
+                
+                # 5. High choice similarity (80% threshold from user's analysis)
+                if (choice_similarity >= 0.80 and 
+                    len(primary_question['choices']) > 1 and len(other_question['choices']) > 1):
+                    is_duplicate = True
+                
+                # 6. Combined similarity (70% question + 60% choice from user's analysis)
+                if (question_similarity >= 0.70 and 
+                    choice_similarity >= 0.60 and 
+                    len(primary_question['choices']) > 0 and len(other_question['choices']) > 0):
+                    is_duplicate = True
+                
+                # 7. Question containment with choice overlap
+                q1_clean = primary_question['normalized_question']
+                q2_clean = other_question['normalized_question']
+                length_diff = abs(len(q1_clean) - len(q2_clean))
+                max_length = max(len(q1_clean), len(q2_clean))
+                
+                if (max_length > 20 and length_diff < max_length * 0.40 and 
+                    (q1_clean in q2_clean or q2_clean in q1_clean) and choice_similarity >= 0.5):
+                    is_duplicate = True
+                
+                if is_duplicate:
+                    current_group.append(other_question)
+                    processed.add(j)
+            
+            if len(current_group) > 1:  # Only add groups with actual duplicates
+                duplicate_groups.append(current_group)
+                processed.add(i)
+        
+        return duplicate_groups
+    
+    def select_best_from_group(self, group: List[Dict]) -> Dict:
+        """Select the best representative question from a duplicate group"""
+        # Quality scoring based on:
+        # 1. Number of occurrences (more popular)
+        # 2. Number of choices (more comprehensive)
+        # 3. Question length (more descriptive)
+        # 4. Recency (if available)
+        
+        def calculate_quality_score(q_obj):
+            score = 0
+            score += q_obj['total_occurrences'] * 2  # Popularity weight
+            score += q_obj['choice_count'] * 5  # Choice diversity weight
+            score += len(q_obj['question_text']) * 0.1  # Length weight
+            return score
+        
+        # Score all questions in group
+        scored_questions = [(calculate_quality_score(q_obj), q_obj) for q_obj in group]
+        
+        # Return highest scoring question
+        best_score, best_question = max(scored_questions, key=lambda x: x[0])
+        
+        return best_question
+
     def validate_deduplication(self, df: pd.DataFrame) -> Dict[str, bool]:
-        """5-point validation system ensuring quality"""
+        """Validation system ensuring quality while preserving unique questions"""
         checks = {}
         
-        # 1. Registration questions consolidated
-        registration_questions = df[df['question_text'].str.contains('registration', case=False, na=False)]
-        checks['registration_consolidated'] = len(registration_questions) <= 5
+        # 1. Unique questions preserved - should have reasonable diversity
+        unique_questions = df['question_text'].nunique()
+        total_questions = len(df)
+        checks['unique_questions_preserved'] = unique_questions >= (total_questions * 0.3)  # At least 30% should be unique
         
-        # 2. Business terminology consistent
+        # 2. Business terminology appropriately handled (not over-consolidated)
         entity_variations = ['business', 'company', 'organization', 'firm']
         entity_questions = df[df['question_text'].str.contains('|'.join(entity_variations), case=False, na=False)]
-        checks['terminology_consistent'] = len(entity_questions) <= 10
+        # Should have multiple variations preserved, not over-consolidated
+        checks['business_terms_preserved'] = len(entity_questions) >= 5
         
         # 3. Choice formatting clean
         clean_choices = df['choice_text'].str.strip() == df['choice_text']
         checks['choice_formatting_clean'] = clean_choices.all()
         
-        # 4. Temporal references normalized
-        temporal_refs = ['2023', '2024', 'last year', 'this year']
+        # 4. Temporal references appropriately normalized (not over-normalized)
+        temporal_refs = ['2023', '2024', 'last year', 'this year', 'YEAR', 'PREVIOUS_YEAR', 'CURRENT_YEAR']
         temporal_questions = df[df['question_text'].str.contains('|'.join(temporal_refs), case=False, na=False)]
-        checks['temporal_normalized'] = len(temporal_questions) <= 3
+        # Should still have temporal questions but consolidated appropriately
+        checks['temporal_appropriately_handled'] = len(temporal_questions) >= 3
         
-        # 5. Yes/No standardized
-        yesno_choices = df[df['choice_text'].str.upper().isin(['YES', 'NO', 'Y', 'N'])]
-        standard_yesno = df[df['choice_text'].isin(['Yes', 'No'])]
-        checks['yesno_standardized'] = len(standard_yesno) >= len(yesno_choices) * 0.8
+        # 5. Duplicate categories properly consolidated
+        # Check for major duplicate patterns that should be reduced
+        nps_questions = df[df['question_text'].str.contains('recommend.*AMI', case=False, na=False)]
+        revenue_questions = df[df['question_text'].str.contains('revenue.*year', case=False, na=False)]
+        employee_questions = df[df['question_text'].str.contains('employee.*year', case=False, na=False)]
+        
+        # These should be consolidated to reasonable numbers
+        duplicate_categories_reduced = (
+            len(nps_questions) <= 10 and  # NPS questions consolidated
+            len(revenue_questions) <= 15 and  # Revenue questions consolidated  
+            len(employee_questions) <= 15  # Employee questions consolidated
+        )
+        checks['duplicate_categories_reduced'] = duplicate_categories_reduced
         
         return checks
+
+    def analyze_duplicate_patterns(self, df: pd.DataFrame) -> Dict[str, List]:
+        """Analyze and report on duplicate patterns found in the survey data"""
+        logger.info("🔍 Analyzing duplicate patterns in the data...")
+        
+        patterns = {
+            'nps_variations': [],
+            'business_registration': [],
+            'employee_count': [],
+            'loan_questions': [],
+            'share_sale': [],
+            'external_finance': [],
+            'business_trajectory': [],
+            'revenue_reporting': [],
+            'temporal_variations': [],
+            'other_duplicates': []
+        }
+        
+        # Define patterns to look for
+        pattern_definitions = {
+            'nps_variations': [
+                r'recommend.*AMI.*scale.*0.*10',
+                r'recommend.*AMI.*scale.*1.*10',
+                r'likely.*recommend.*AMI',
+                r'NPS.*Specific.*Service',
+                r'NPS.*Kinyarwanda'
+            ],
+            'business_registration': [
+                r'business.*formally.*registered',
+                r'business.*registered.*note',
+                r'company.*formally.*registered',
+                r'business registration'
+            ],
+            'employee_count': [
+                r'end.*year.*employees',
+                r'employees.*total.*now',
+                r'employees.*2024',
+                r'employees.*2021',
+                r'employees.*2020',
+                r'Number.*Employees.*Umubare'
+            ],
+            'loan_questions': [
+                r'business.*obtained.*loan.*12.*months',
+                r'business.*take.*loans.*year',
+                r'loans.*financial.*year',
+                r'loans.*during.*2021',
+                r'loans.*2022',
+                r'loans.*2023'
+            ],
+            'revenue_reporting': [
+                r'Total.*Revenue.*year',
+                r'Total.*Revenue.*2021',
+                r'Total.*Revenue.*2022', 
+                r'Total.*Revenue.*2023',
+                r'Total.*Revenue.*2024',
+                r'Revenue.*financial.*year'
+            ]
+        }
+        
+        # Analyze each pattern
+        for pattern_name, regexes in pattern_definitions.items():
+            found_questions = []
+            for regex in regexes:
+                matches = df[df['question_text'].str.contains(regex, case=False, na=False)]
+                if len(matches) > 0:
+                    found_questions.extend(matches['question_text'].unique().tolist())
+            
+            patterns[pattern_name] = list(set(found_questions))  # Remove duplicates
+        
+        # Look for temporal variations (same question with different years)
+        temporal_groups = {}
+        for _, row in df.iterrows():
+            question = row['question_text']
+            # Create a version without years
+            question_no_year = re.sub(r'\b20[0-9]{2}\b', 'YEAR', question)
+            question_no_year = re.sub(r'\b(last|this|current|previous)\s+year\b', 'TEMPORAL_YEAR', question_no_year, flags=re.IGNORECASE)
+            
+            if question_no_year not in temporal_groups:
+                temporal_groups[question_no_year] = []
+            temporal_groups[question_no_year].append(question)
+        
+        # Find groups with multiple temporal variations
+        for normalized_q, variations in temporal_groups.items():
+            if len(set(variations)) > 1:  # Multiple unique variations
+                patterns['temporal_variations'].extend(variations)
+        
+        # Report findings
+        total_duplicates = sum(len(questions) for questions in patterns.values())
+        logger.info(f"📊 Found {total_duplicates} questions across duplicate pattern categories")
+        
+        for pattern_name, questions in patterns.items():
+            if questions:
+                logger.info(f"   {pattern_name}: {len(questions)} questions")
+        
+        return patterns
 
 class GoogleSheetsExporter:
     """Export deduplication results to Google Sheets"""
@@ -453,30 +763,43 @@ class GoogleSheetsExporter:
                 worksheet.update('A3', all_data)
     
     def _export_summary_report(self, worksheet, step1a_report: Dict, step1b_report: Dict):
-        """Export summary report"""
+        """Export enhanced summary report with unique question preservation metrics"""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
         
         summary_data = [
-            ['Survey Question Bank Deduplication Summary', ''],
+            ['Survey Question Bank Deduplication Summary (Enhanced)', ''],
             ['Generated on:', timestamp],
             ['', ''],
-            ['Step 1A: Initial Question Bank Deduplication', ''],
+            ['Step 1A: Improved Question Bank Deduplication', ''],
             ['Original Records:', step1a_report['original_count']],
             ['Final Records:', step1a_report['final_count']],
             ['Reduction Percentage:', f"{step1a_report['reduction_percentage']:.2f}%"],
             ['Records Eliminated:', step1a_report['choices_eliminated']],
+            ['Original Unique Questions:', step1a_report.get('original_unique_questions', 'N/A')],
+            ['Final Unique Questions:', step1a_report.get('final_unique_questions', 'N/A')],
+            ['Unique Question Preservation:', f"{step1a_report.get('unique_preservation_rate', 0):.1f}%"],
             ['', ''],
             ['Step 1B: Comprehensive Question Bank', ''],
             ['Original Records:', step1b_report['original_count']],
             ['Final Records:', step1b_report['final_count']],
             ['Reduction Percentage:', f"{step1b_report['reduction_percentage']:.2f}%"],
             ['Records Eliminated:', step1b_report['choices_eliminated']],
+            ['Original Unique Questions:', step1b_report.get('original_unique_questions', 'N/A')],
+            ['Final Unique Questions:', step1b_report.get('final_unique_questions', 'N/A')],
+            ['Unique Question Preservation:', f"{step1b_report.get('unique_preservation_rate', 0):.1f}%"],
             ['', ''],
             ['Quality Metrics', ''],
-            ['Step 1A Performance:', 'Exceptional (99.88% target achieved)' if step1a_report['reduction_percentage'] > 99 else 'Good'],
-            ['Step 1B Performance:', 'Exceptional (99.66% target achieved)' if step1b_report['reduction_percentage'] > 99 else 'Good'],
-            ['Data Quality:', 'Validated through 5-point quality system'],
-            ['Processing Method:', 'Enhanced deduplication with business terminology normalization']
+            ['Step 1A Performance:', f'Balanced reduction with {step1a_report.get("unique_preservation_rate", 0):.1f}% unique preservation'],
+            ['Step 1B Performance:', f'Balanced reduction with {step1b_report.get("unique_preservation_rate", 0):.1f}% unique preservation'],
+            ['Data Quality:', 'Validated through enhanced quality system'],
+            ['Processing Method:', 'Improved deduplication preserving unique questions while consolidating true duplicates'],
+            ['', ''],
+            ['Key Improvements Made:', ''],
+            ['- Fixed over-aggressive normalization', ''],
+            ['- Added unique question preservation tracking', ''],
+            ['- Enhanced duplicate detection with similarity analysis', ''],
+            ['- Quality-based prioritization for duplicate resolution', ''],
+            ['- Comprehensive duplicate pattern analysis', '']
         ]
         
         worksheet.update('A1', summary_data)
@@ -484,8 +807,9 @@ class GoogleSheetsExporter:
         # Format the summary
         worksheet.format('A1', {'textFormat': {'bold': True, 'fontSize': 14}})
         worksheet.format('A4', {'textFormat': {'bold': True}})
-        worksheet.format('A10', {'textFormat': {'bold': True}})
-        worksheet.format('A16', {'textFormat': {'bold': True}})
+        worksheet.format('A13', {'textFormat': {'bold': True}})
+        worksheet.format('A22', {'textFormat': {'bold': True}})
+        worksheet.format('A28', {'textFormat': {'bold': True}})
 
 class ColabSurveyDeduplicationPipeline:
     """Complete pipeline for Google Colab with Sheets export"""
@@ -572,13 +896,21 @@ class ColabSurveyDeduplicationPipeline:
     def run_step1a_deduplication(self, 
                                 survey_stages: Optional[List[str]] = None,
                                 limit: int = 25000) -> Dict:
-        """Step 1A: Initial question bank deduplication (targeting 99.88% reduction)"""
-        logger.info("🚀 Starting Step 1A: Initial Question Bank Deduplication")
+        """Step 1A: Improved question bank deduplication that preserves unique questions"""
+        logger.info("🚀 Starting Step 1A: Improved Question Bank Deduplication")
         
         df = self.get_survey_data_from_snowflake(survey_stages, limit)
         
-        # Apply enhanced deduplication
+        # Analyze duplicate patterns before deduplication
+        logger.info("📋 Analyzing duplicate patterns in original data...")
+        original_patterns = self.deduplicator.analyze_duplicate_patterns(df)
+        
+        # Apply improved deduplication
         df_dedup, report = self.deduplicator.apply_enhanced_deduplication_solutions(df)
+        
+        # Analyze patterns after deduplication
+        logger.info("📋 Analyzing patterns after deduplication...")
+        final_patterns = self.deduplicator.analyze_duplicate_patterns(df_dedup)
         
         # Validate results
         validation = self.deduplicator.validate_deduplication(df_dedup)
@@ -587,26 +919,50 @@ class ColabSurveyDeduplicationPipeline:
         for check, status in validation.items():
             logger.info(f"   {check}: {'✅' if status else '❌'}")
         
+        # Calculate unique question preservation
+        original_unique = df['question_text'].nunique()
+        final_unique = df_dedup['question_text'].nunique()
+        unique_preservation_rate = (final_unique / original_unique * 100) if original_unique > 0 else 0
+        
+        logger.info(f"📊 Unique Question Preservation: {final_unique}/{original_unique} ({unique_preservation_rate:.1f}%)")
+        
         self.step1a_results = {
             'dataframe': df_dedup,
-            'report': report,
+            'report': {
+                **report,
+                'unique_preservation_rate': unique_preservation_rate,
+                'original_unique_questions': original_unique,
+                'final_unique_questions': final_unique
+            },
             'validation': validation,
+            'duplicate_patterns': {
+                'original': original_patterns,
+                'final': final_patterns
+            },
             'timestamp': datetime.now()
         }
         
-        logger.info(f"✅ Step 1A completed: {report['reduction_percentage']:.2f}% reduction achieved")
+        logger.info(f"✅ Step 1A completed: {report['reduction_percentage']:.2f}% reduction with {unique_preservation_rate:.1f}% unique question preservation")
         return self.step1a_results
     
     def run_step1b_deduplication(self, 
                                 survey_stages: Optional[List[str]] = None,
                                 limit: int = 50000) -> Dict:
-        """Step 1B: Comprehensive question bank (targeting 99.66% reduction)"""
+        """Step 1B: Comprehensive question bank with improved duplicate handling"""
         logger.info("🚀 Starting Step 1B: Comprehensive Question Bank Deduplication")
         
         df = self.get_survey_data_from_snowflake(survey_stages, limit)
         
-        # Apply enhanced deduplication
+        # Analyze duplicate patterns before deduplication
+        logger.info("📋 Analyzing duplicate patterns in original data...")
+        original_patterns = self.deduplicator.analyze_duplicate_patterns(df)
+        
+        # Apply improved deduplication
         df_dedup, report = self.deduplicator.apply_enhanced_deduplication_solutions(df)
+        
+        # Analyze patterns after deduplication
+        logger.info("📋 Analyzing patterns after deduplication...")
+        final_patterns = self.deduplicator.analyze_duplicate_patterns(df_dedup)
         
         # Validate results
         validation = self.deduplicator.validate_deduplication(df_dedup)
@@ -615,14 +971,30 @@ class ColabSurveyDeduplicationPipeline:
         for check, status in validation.items():
             logger.info(f"   {check}: {'✅' if status else '❌'}")
         
+        # Calculate unique question preservation
+        original_unique = df['question_text'].nunique()
+        final_unique = df_dedup['question_text'].nunique()
+        unique_preservation_rate = (final_unique / original_unique * 100) if original_unique > 0 else 0
+        
+        logger.info(f"📊 Unique Question Preservation: {final_unique}/{original_unique} ({unique_preservation_rate:.1f}%)")
+        
         self.step1b_results = {
             'dataframe': df_dedup,
-            'report': report,
+            'report': {
+                **report,
+                'unique_preservation_rate': unique_preservation_rate,
+                'original_unique_questions': original_unique,
+                'final_unique_questions': final_unique
+            },
             'validation': validation,
+            'duplicate_patterns': {
+                'original': original_patterns,
+                'final': final_patterns
+            },
             'timestamp': datetime.now()
         }
         
-        logger.info(f"✅ Step 1B completed: {report['reduction_percentage']:.2f}% reduction achieved")
+        logger.info(f"✅ Step 1B completed: {report['reduction_percentage']:.2f}% reduction with {unique_preservation_rate:.1f}% unique question preservation")
         return self.step1b_results
     
     def export_to_google_sheets(self, sheets_url: str = None) -> Dict[str, str]:
