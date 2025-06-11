@@ -409,23 +409,48 @@ class GoogleSheetsExporter:
     
     def _export_dataframe_to_worksheet(self, worksheet, df: pd.DataFrame, title: str):
         """Export DataFrame to specific worksheet"""
-        # Add title
-        worksheet.update('A1', title)
-        
-        # Add headers starting from row 3
-        headers = df.columns.tolist()
-        worksheet.update('A3', [headers])
-        
-        # Add data
-        if len(df) > 0:
-            data = df.values.tolist()
-            worksheet.update(f'A4:Z{3 + len(data)}', data)
-        
-        # Format headers
-        worksheet.format('A3:Z3', {
-            'textFormat': {'bold': True},
-            'backgroundColor': {'red': 0.9, 'green': 0.9, 'blue': 0.9}
-        })
+        try:
+            # Clear the worksheet first
+            worksheet.clear()
+            
+            # Add title
+            worksheet.update('A1', [[title]])
+            
+            # Add headers starting from row 3
+            headers = df.columns.tolist()
+            worksheet.update('A3', [headers])
+            
+            # Add data if available
+            if len(df) > 0:
+                # Convert DataFrame to list of lists, handling NaN values
+                data = df.fillna('').astype(str).values.tolist()
+                
+                # Update in batches to avoid API limits
+                batch_size = 1000
+                for i in range(0, len(data), batch_size):
+                    batch = data[i:i+batch_size]
+                    start_row = 4 + i
+                    end_row = start_row + len(batch) - 1
+                    end_col = chr(ord('A') + len(headers) - 1)
+                    
+                    range_name = f'A{start_row}:{end_col}{end_row}'
+                    worksheet.update(range_name, batch)
+            
+            # Format headers
+            worksheet.format('A3:Z3', {
+                'textFormat': {'bold': True},
+                'backgroundColor': {'red': 0.9, 'green': 0.9, 'blue': 0.9}
+            })
+            
+        except Exception as e:
+            logger.error(f"❌ Error exporting to worksheet: {e}")
+            # Fallback: simple export
+            worksheet.clear()
+            worksheet.update('A1', [[title]])
+            if len(df) > 0:
+                # Simple export without formatting
+                all_data = [df.columns.tolist()] + df.fillna('').astype(str).values.tolist()
+                worksheet.update('A3', all_data)
     
     def _export_summary_report(self, worksheet, step1a_report: Dict, step1b_report: Dict):
         """Export summary report"""
@@ -698,6 +723,30 @@ def install_dependencies():
     
     print("✅ Copy and run these commands in your Colab notebook")
     return install_commands
+
+# Test the Snowflake connection with the fixed file
+import importlib
+import sys
+
+# Reload the module to pick up changes
+if 'colab_gsheets_deduplicator' in sys.modules:
+    importlib.reload(sys.modules['colab_gsheets_deduplicator'])
+
+# Test connection
+from colab_gsheets_deduplicator import SnowflakeConnection
+import os
+
+os.environ['SNOWFLAKE_USER'] = 'ami_tableau'
+os.environ['SNOWFLAKE_PASSWORD'] = 'fok7domp6CEED!auw'
+os.environ['SNOWFLAKE_ACCOUNT'] = 'qu54429.eu-central-1'
+
+print("🔍 Testing Snowflake connection...")
+try:
+    conn = SnowflakeConnection()
+    engine = conn.connect()
+    print("✅ Snowflake connection successful!")
+except Exception as e:
+    print(f"❌ Connection failed: {e}")
 
 if __name__ == "__main__":
     # Example usage
